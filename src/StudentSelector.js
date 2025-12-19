@@ -13,9 +13,6 @@ const StudentSelector = ({ allStudents, activeTeam, onAdd }) => {
   return (
     // CHANGED: width '300px' -> '100%' to fit parent container
     <div style={{ position: 'relative', width: '100%', marginBottom: '10px' }}>
-      <label style={{ display: 'block', marginBottom: '5px', fontSize: '0.9em', color: '#aaa' }}>
-        Add Student to Team:
-      </label>
       <input
         type="text"
         placeholder="Search or click to list..."

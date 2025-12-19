@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 
 const FPS = 30;
 const FRAME_MS = 1 / FPS;
-const snapToFrame = (time) => Math.round(time * FPS) / FPS;
+const snapToFrame = (time) => Math.ceil(time * FPS) / FPS;
 
 const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, raidDuration, formatTimeFn, calculateCostAtTime, onJumpToTime }) => {
   const [hoveredCost, setHoveredCost] = useState(null);
@@ -13,12 +13,17 @@ const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, rai
     
     const missing = targetCost - currentCost;
     const effectiveStartTime = Math.max(currentElapsed, 2.0);
-    const timeNeeded = missing / costPerSecond;
+    
+    // GUARD: If rate is 0, we can't estimate. Return current time or null.
+    // In practice, rate shouldn't be 0 unless team is empty.
+    const safeRate = Math.max(costPerSecond, 0.001); 
+    const timeNeeded = missing / safeRate;
+    
     let absoluteTime = snapToFrame(effectiveStartTime + timeNeeded);
 
-    // Verify
+    // Verify Loop (Increased safety to handle rate fluctuations)
     let safety = 0;
-    while (calculateCostAtTime(absoluteTime) < targetCost - 0.001 && safety < 10) {
+    while (calculateCostAtTime(absoluteTime) < targetCost - 0.001 && safety < 150) {
         absoluteTime += FRAME_MS;
         absoluteTime = snapToFrame(absoluteTime);
         safety++;
@@ -38,7 +43,6 @@ const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, rai
 
   return (
     <div style={{ width: '100%', padding: '0' }}>
-      {/* REMOVED overflow: 'hidden' here so tooltips can pop out */}
       <div style={{ display: 'flex', height: '25px', border: '1px solid #555', background: '#222', position: 'relative', borderRadius: '3px' }}>
         
         {Array.from({ length: maxCost }).map((_, i) => {
