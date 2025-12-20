@@ -20,6 +20,7 @@ const parseStudentData = (data) => {
     
     const effectType = effects.length > 0 ? (effects[0].Type || "Unknown") : "Unknown";
     
+    // Check for CostChange effect (Ui, NY.Fuuka)
     const costChangeEffect = effects.find(e => e.Type === "CostChange");
     let costReduction = null;
     if (costChangeEffect) {
@@ -31,10 +32,16 @@ const parseStudentData = (data) => {
         };
     }
 
+    // EX Duration (Fallback for S.Hoshino)
+    // We check for 'Duration' in effects. Note: Damage effects often don't have Duration.
     const buffDurationMs = effects.reduce((max, effect) => (effect.Duration > max) ? effect.Duration : max, 0) || 0;
     const costVal = exSkill.Cost && exSkill.Cost.length >= 5 ? exSkill.Cost[4] : (exSkill.Cost ? exSkill.Cost[0] : 0);
 
+    // --- COST REGEN LOGIC ---
     let passiveRegenPercent = 0; 
+    let passiveRegenFlat = 0;
+    let passiveRegenFlatStacks = null; // For Cherino
+    
     let activeRegenFlat = 0;     
     let activeRegenPercent = 0;  
     let activeRegenDuration = 0; 
@@ -45,23 +52,51 @@ const parseStudentData = (data) => {
             const isRegenStat = effect.Stat === 'RegenCost_Coefficient' || effect.Stat === 'RegenCost_Base';
             
             if (isRegenStat) {
+                // Check for Stacking (Array of Arrays) - Cherino
+                const isStacking = effect.Value && effect.Value.length > 1 && Array.isArray(effect.Value[0]);
+                
                 let val = 0;
-                if (effect.Value && effect.Value[0]) {
-                    const maxVal = effect.Value[0][effect.Value[0].length - 1];
-                    val = maxVal;
+                let stackValues = [];
+                
+                if (isStacking) {
+                    stackValues = effect.Value.map(levels => levels[levels.length - 1]);
+                } else if (effect.Value && effect.Value[0]) {
+                    val = effect.Value[0][effect.Value[0].length - 1];
                 }
 
-                if (student.SquadType === 'Support') {
-                    if (effect.Stat === 'RegenCost_Coefficient') passiveRegenPercent += val / 10000;
-                } else {
+                // --- CLASSIFICATION LOGIC ---
+                // 1. Explicit Duration (e.g. Hifumi 5s) -> ACTIVE
+                if (effect.Duration) {
                     if (effect.Stat === 'RegenCost_Coefficient') activeRegenPercent += val / 10000;
                     if (effect.Stat === 'RegenCost_Base') activeRegenFlat += val;
-                    if (effect.Duration) activeRegenDuration = Math.max(activeRegenDuration, effect.Duration / 1000);
+                    activeRegenDuration = Math.max(activeRegenDuration, effect.Duration / 1000);
+                } 
+                // 2. No Duration (Could be Passive Aura OR Active linked to EX)
+                else {
+                    // Heuristic: If Striker AND EX has a Buff Duration -> It's likely S.Hoshino style (Active during EX)
+                    // Cherino's EX is Damage only (buffDurationMs == 0), so she stays Passive.
+                    // Specials are always Passive.
+                    const isExLinked = student.SquadType === 'Main' && buffDurationMs > 0;
+
+                    if (isExLinked) {
+                         // Treat as Active (S.Hoshino)
+                         if (effect.Stat === 'RegenCost_Coefficient') activeRegenPercent += val / 10000;
+                         if (effect.Stat === 'RegenCost_Base') activeRegenFlat += val;
+                    } else {
+                         // Treat as Passive (Cherino, Himari)
+                         if (isStacking) {
+                             if (effect.Stat === 'RegenCost_Base') passiveRegenFlatStacks = stackValues;
+                         } else {
+                             if (effect.Stat === 'RegenCost_Coefficient') passiveRegenPercent += val / 10000;
+                             if (effect.Stat === 'RegenCost_Base') passiveRegenFlat += val;
+                         }
+                    }
                 }
             }
         });
     }
 
+    // Fallback for Active Duration (S.Hoshino)
     if ((activeRegenFlat > 0 || activeRegenPercent > 0) && activeRegenDuration === 0) {
         activeRegenDuration = buffDurationMs / 1000; 
     }
@@ -69,18 +104,27 @@ const parseStudentData = (data) => {
     return {
       id: student.Id,
       name: student.Name,
+      school: student.School,
       role: student.SquadType === 'Main' ? 'Striker' : 'Special',
       regenCost: student.RegenCost,
-      passiveRegenPercent, 
+      
+      // Passives
+      passiveRegenPercent,
+      passiveRegenFlat,
+      passiveRegenFlatStacks,
+
+      devName: student.DevName,
       exSkill: {
         name: exSkill.Name || "Unknown",
         type: effectType,
         cost: costVal, 
         animationDuration: snapToFrame((exSkill.Duration || 0) / 30), 
         buffDuration: buffDurationMs / 1000,
+        
         costRegenFlat: activeRegenFlat,
         costRegenPercent: activeRegenPercent,
         costRegenDuration: activeRegenDuration, 
+        
         costReduction: costReduction 
       }
     };
@@ -100,7 +144,6 @@ const formatRaidTime = (time, totalTime) => {
 };
 
 const App = () => {
-  // Use arrays with null to represent fixed slots
   const [team, setTeam] = useState({ 
       strikers: [null, null, null, null], 
       specials: [null, null] 
@@ -114,15 +157,13 @@ const App = () => {
   const [inputMillis, setInputMillis] = useState(0);
   
   const [targetingSource, setTargetingSource] = useState(null);
-  
-  // Track which slot is selected for adding a student
-  const [selectedSlot, setSelectedSlot] = useState(null); // { role: 'Striker', index: 0 }
+  const [selectedSlot, setSelectedSlot] = useState(null); 
 
   const activeTeam = useMemo(() => {
       return [...team.strikers, ...team.specials].filter(s => s !== null);
   }, [team]);
 
-  // --- COST ENGINE ---
+  // --- 1. COST HISTORY ---
   const getStudentStatus = (studentId) => {
       const buffs = {}; 
       const sortedEvents = [...timelineEvents].sort((a, b) => a.startTime - b.startTime);
@@ -157,10 +198,41 @@ const App = () => {
       return { effectiveCost, activeBuff };
   };
 
+  // --- 2. COST REGEN ENGINE ---
   const { baseRegenSpeed, passivePercentTotal } = useMemo(() => {
-    const base = activeTeam.reduce((sum, s) => sum + s.regenCost, 0);
-    const passive = activeTeam.reduce((sum, s) => sum + (s.passiveRegenPercent || 0), 0);
-    return { baseRegenSpeed: base, passivePercentTotal: passive };
+    let base = 0;
+    let passivePercent = 0;
+    
+    // Track Special passives to apply Non-Stacking rule (Max Only)
+    let maxSpecialPercent = 0;
+    
+    activeTeam.forEach(s => {
+        base += s.regenCost;
+
+        if (s.role === 'Special') {
+            if (s.passiveRegenPercent > maxSpecialPercent) {
+                maxSpecialPercent = s.passiveRegenPercent;
+            }
+        } else {
+            // Strikers
+            if (s.passiveRegenFlatStacks) {
+                const schoolCount = activeTeam.filter(t => t.id !== s.id && t.school === 'RedWinter').length;
+                const index = Math.min(schoolCount, s.passiveRegenFlatStacks.length - 1);
+                base += s.passiveRegenFlatStacks[index];
+            } 
+            else if (s.passiveRegenFlat) {
+                base += s.passiveRegenFlat;
+            }
+
+            if (s.passiveRegenPercent) {
+                passivePercent += s.passiveRegenPercent;
+            }
+        }
+    });
+
+    passivePercent += maxSpecialPercent;
+
+    return { baseRegenSpeed: base, passivePercentTotal: passivePercent };
   }, [activeTeam]);
 
   const calculateCostAtTime = (targetElapsed, excludeEventId = null) => {
@@ -287,12 +359,9 @@ const App = () => {
     updateInputsFromElapsed(snapToFrame(time));
   };
 
-  // --- TEAM MANAGEMENT ---
   const handleSlotClick = (role, index) => {
       const currentStudent = role === 'Striker' ? team.strikers[index] : team.specials[index];
-      
       if (currentStudent) {
-          // Remove student
           setTeam(prev => {
               const newArr = role === 'Striker' ? [...prev.strikers] : [...prev.specials];
               newArr[index] = null;
@@ -300,7 +369,6 @@ const App = () => {
           });
           setSelectedSlot(null);
       } else {
-          // Select empty slot
           setSelectedSlot({ role, index });
           setTimeout(() => {
               const el = document.getElementById('student-search-input');
@@ -311,14 +379,13 @@ const App = () => {
 
   const addStudentToSelectedSlot = (student) => {
       if (!selectedSlot) return;
-      
       setTeam(prev => {
           const role = selectedSlot.role;
           const newArr = role === 'Striker' ? [...prev.strikers] : [...prev.specials];
           newArr[selectedSlot.index] = student;
           return { ...prev, [role === 'Striker' ? 'strikers' : 'specials']: newArr };
       });
-      setSelectedSlot(null); // Deselect after adding
+      setSelectedSlot(null); 
   };
 
   const handleSkillClick = (student) => {
@@ -391,7 +458,6 @@ const App = () => {
     });
   };
 
-  // --- HELPER: Slot Component ---
   const StudentSlot = ({ student, label, isSelected, color, onClick }) => (
     <div 
         onClick={onClick}
@@ -427,7 +493,6 @@ const App = () => {
   return (
     <div style={{ padding: '30px', fontFamily: 'monospace', backgroundColor: '#121212', color: '#e0e0e0', minHeight: '100vh' }}>
       
-      {/* HEADER */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'15px'}}>
         <h2 style={{color: '#90caf9', margin: 0, fontSize:'1.5rem'}}>Blue Archive Timeline</h2>
         <div style={{fontSize:'0.8em', color:'#666'}}>
@@ -437,10 +502,7 @@ const App = () => {
       </div>
       <hr style={{ borderColor: '#333', marginBottom: '25px' }} />
       
-      {/* CONTROLS AREA */}
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems:'start', marginBottom:'30px' }}>
-        
-        {/* TIME CONTROLS */}
         <div style={{ background: '#1e1e1e', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
           <div style={{ marginBottom: '10px', display:'flex', gap:'10px', alignItems:'center' }}>
             <label style={{ fontSize: '0.8em', color: '#aaa' }}>Raid Time</label>
@@ -469,10 +531,7 @@ const App = () => {
           </div>
         </div>
 
-        {/* TEAM & SEARCH PANEL */}
         <div style={{ width:'fit-content', background: '#1e1e1e', padding: '15px', borderRadius: '8px', border: '1px solid #333' }}>
-           
-           {/* Search Bar (Compact) */}
            <div style={{marginBottom: '15px', width: '250px'}}>
                <label style={{display:'block', marginBottom:'5px', color: selectedSlot ? '#ffeb3b' : '#aaa', fontSize:'0.8em', fontWeight:'bold'}}>
                    {selectedSlot ? `SELECT ${selectedSlot.role.toUpperCase()} (SLOT ${selectedSlot.index + 1})` : "SELECT SLOT TO ADD"}
@@ -486,9 +545,7 @@ const App = () => {
                />
            </div>
 
-           {/* Team Slots (Compact Layout) */}
            <div style={{display:'flex', gap:'15px'}}>
-               {/* STRIKERS */}
                <div>
                    <label style={{display:'block', marginBottom:'5px', color:'#ef5350', fontSize:'0.7em', fontWeight:'bold'}}>STRIKERS</label>
                    <div style={{display:'flex', gap:'5px'}}>
@@ -508,7 +565,6 @@ const App = () => {
 
                <div style={{width:'1px', background:'#444', margin:'0 5px'}}></div>
 
-               {/* SPECIALS */}
                <div>
                    <label style={{display:'block', marginBottom:'5px', color:'#42a5f5', fontSize:'0.7em', fontWeight:'bold'}}>SPECIALS</label>
                    <div style={{display:'flex', gap:'5px'}}>
@@ -530,7 +586,6 @@ const App = () => {
 
       </div>
 
-      {/* SKILL BUTTONS */}
       <div style={{ marginBottom: '20px' }}>
         <div style={{display:'flex', justifyContent:'space-between'}}>
             <label style={{display:'block', marginBottom:'8px', color:'#aaa', fontSize:'0.9em'}}>
@@ -580,7 +635,7 @@ const App = () => {
                    <span style={{ color: activeBuff ? '#76ff03' : 'inherit' }}>
                        Cost: {effectiveCost} {activeBuff && "(-50%)"}
                    </span>
-                   {isBusy && <span style={{color:'#ef5350'}}>BUSY</span>}
+                   {isBusy && <span style={{color:'#ef5350'}}>Active</span>}
                 </div>
               </button>
             )
