@@ -1,22 +1,32 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
-const StudentSelector = ({ allStudents, activeTeam, onAdd }) => {
+const StudentSelector = ({ allStudents, activeTeam, onAdd, filterRole, disabled }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [isOpen, setIsOpen] = useState(false);
+
+  // Clear search when filter role changes (new slot selected)
+  useEffect(() => {
+      setSearchTerm("");
+  }, [filterRole]);
 
   const filteredStudents = allStudents.filter(student => {
     const isInTeam = activeTeam.find(m => m.id === student.id);
     const matchesSearch = searchTerm === "" || student.name.toLowerCase().includes(searchTerm.toLowerCase());
-    return !isInTeam && matchesSearch;
+    
+    // Role Filter Logic
+    const matchesRole = filterRole ? student.role === filterRole : true;
+
+    return !isInTeam && matchesSearch && matchesRole;
   });
 
   return (
-    // CHANGED: width '300px' -> '100%' to fit parent container
     <div style={{ position: 'relative', width: '100%', marginBottom: '10px' }}>
       <input
+        id="student-search-input"
         type="text"
-        placeholder="Search or click to list..."
+        placeholder={disabled ? "Select a slot first..." : (filterRole ? `Search ${filterRole}...` : "Search...")}
         value={searchTerm}
+        disabled={disabled}
         onChange={(e) => {
           setSearchTerm(e.target.value);
           setIsOpen(true);
@@ -24,13 +34,17 @@ const StudentSelector = ({ allStudents, activeTeam, onAdd }) => {
         onFocus={() => setIsOpen(true)}
         onBlur={() => setTimeout(() => setIsOpen(false), 200)} 
         style={{
-          width: '100%', padding: '8px', background: '#333', 
-          border: '1px solid #555', color: 'white', borderRadius: '4px',
-          boxSizing: 'border-box' // Ensure padding doesn't overflow width
+          width: '100%', padding: '8px', 
+          background: disabled ? '#222' : '#333', 
+          border: '1px solid #555', 
+          color: disabled ? '#555' : 'white', 
+          borderRadius: '4px',
+          boxSizing: 'border-box',
+          cursor: disabled ? 'not-allowed' : 'text'
         }}
       />
       
-      {isOpen && (
+      {isOpen && !disabled && (
         <div style={{
           position: 'absolute', top: '100%', left: 0, right: 0,
           background: '#222', border: '1px solid #444', 
@@ -39,7 +53,7 @@ const StudentSelector = ({ allStudents, activeTeam, onAdd }) => {
         }}>
           {filteredStudents.length === 0 ? (
             <div style={{ padding: '10px', color: '#777', fontSize: '0.9em' }}>
-              {searchTerm ? "No match found" : "All students added"}
+              {searchTerm ? "No match found" : (filterRole ? `All ${filterRole}s available` : "All students added")}
             </div>
           ) : (
             filteredStudents.map(s => (
