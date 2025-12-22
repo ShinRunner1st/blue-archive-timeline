@@ -1,10 +1,18 @@
 import React, { useState, useEffect } from 'react';
 
+// Simple helper for image requiring
+const getIconUrl = (id) => {
+    try {
+        return require(`./images/student/icon/${id}.webp`);
+    } catch (err) {
+        return null;
+    }
+};
+
 const StudentSelector = ({ allStudents, activeTeam, onAdd, filterRole, disabled }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [isOpen, setIsOpen] = useState(false);
 
-  // Clear search when filter role changes (new slot selected)
   useEffect(() => {
       setSearchTerm("");
   }, [filterRole]);
@@ -13,7 +21,7 @@ const StudentSelector = ({ allStudents, activeTeam, onAdd, filterRole, disabled 
     const isInTeam = activeTeam.find(m => m.id === student.id);
     const matchesSearch = searchTerm === "" || student.name.toLowerCase().includes(searchTerm.toLowerCase());
     
-    // Role Filter Logic
+    // Role Filter
     const matchesRole = filterRole ? student.role === filterRole : true;
 
     return !isInTeam && matchesSearch && matchesRole;
@@ -66,15 +74,20 @@ const StudentSelector = ({ allStudents, activeTeam, onAdd, filterRole, disabled 
                 }}
                 style={{
                   padding: '8px', cursor: 'pointer', borderBottom: '1px solid #333',
-                  display: 'flex', justifyContent: 'space-between'
+                  display: 'flex', alignItems: 'center', gap: '10px'
                 }}
                 onMouseEnter={(e) => e.currentTarget.style.background = '#333'}
                 onMouseLeave={(e) => e.currentTarget.style.background = '#222'}
               >
-                <span>{s.name}</span>
-                <span style={{ fontSize: '0.8em', color: s.role === 'Striker' ? '#ef5350' : '#42a5f5' }}>
-                  {s.role}
-                </span>
+                <div style={{width:'30px', height:'30px', background:'#000', borderRadius:'50%', overflow:'hidden'}}>
+                    <img src={getIconUrl(s.id)} alt="" style={{width:'100%', height:'100%', objectFit:'cover'}} />
+                </div>
+                <div style={{flex:1}}>
+                    <div style={{fontWeight:'bold', fontSize:'0.9em'}}>{s.name}</div>
+                    <div style={{ fontSize: '0.75em', color: s.role === 'Striker' ? '#ef5350' : '#42a5f5' }}>
+                      {s.role}
+                    </div>
+                </div>
               </div>
             ))
           )}
