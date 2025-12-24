@@ -7,21 +7,16 @@ const snapToFrame = (time) => Math.ceil(time * FPS) / FPS;
 const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, raidDuration, formatTimeFn, calculateCostAtTime, onJumpToTime }) => {
   const [hoveredCost, setHoveredCost] = useState(null);
 
-  // Reusable helper to get the absolute ready time for a target cost
   const getAbsoluteReadyTime = (targetCost) => {
-    if (targetCost <= currentCost) return null; // Already ready
+    if (targetCost <= currentCost) return null; 
     
     const missing = targetCost - currentCost;
     const effectiveStartTime = Math.max(currentElapsed, 2.0);
-    
-    // GUARD: If rate is 0, we can't estimate. Return current time or null.
-    // In practice, rate shouldn't be 0 unless team is empty.
     const safeRate = Math.max(costPerSecond, 0.001); 
     const timeNeeded = missing / safeRate;
     
     let absoluteTime = snapToFrame(effectiveStartTime + timeNeeded);
 
-    // Verify Loop (Increased safety to handle rate fluctuations)
     let safety = 0;
     while (calculateCostAtTime(absoluteTime) < targetCost - 0.001 && safety < 150) {
         absoluteTime += FRAME_MS;
@@ -32,9 +27,7 @@ const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, rai
   };
 
   const handleClick = (costValue) => {
-      // Jump to the time this cost becomes available
       if (costValue <= currentCost) return;
-
       const readyTime = getAbsoluteReadyTime(costValue);
       if (readyTime !== null && onJumpToTime) {
           onJumpToTime(readyTime);
@@ -66,7 +59,7 @@ const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, rai
                 position: 'relative',
                 borderRight: i < maxCost - 1 ? '1px solid #444' : 'none',
                 cursor: isFilled ? 'default' : 'pointer',
-                transition: 'background 0.2s'
+                // Removed transition here
               }}
             >
               {isPartial && (
@@ -80,7 +73,6 @@ const CostBar = ({ maxCost = 10, currentCost, costPerSecond, currentElapsed, rai
               
               <span style={{ zIndex: 1 }}>{costValue}</span>
 
-              {/* TOOLTIP */}
               {hoveredCost === costValue && (
                 <div style={{
                   position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',

@@ -1,27 +1,58 @@
 import { snapToFrame } from './timeUtils';
+import { ACCUMULATION_STUDENTS, SPECIAL_REGEN_LOGIC } from './skillLogic';
 import rawStudentData from '../students.json';
-
-const ACCUMULATION_STUDENTS = {
-    "10033": { duration: 10 }, 
-    "20023": { duration: 15 }
-};
-
-const SPECIAL_REGEN_LOGIC = {
-    "10003": { slot: "ExtraPassive", type: "Active", duration: 5 }, 
-    "10017": { slot: "ExtraPassive", type: "PassiveStack", condition: "School_RedWinter" }, 
-    "10045": { slot: "ExtraPassive", type: "Active", duration: -1 }, 
-    "10071": { slot: "ExtraPassive", type: "Ignore" }, 
-    "10104": { slot: "ExtraPassive", type: "Active", duration: 5 }, 
-    "10109": { slot: "Public", type: "Active", condition: "Every_2_Ex", duration: 30 }, 
-    "10110": { slot: "Ex", type: "Active", duration: 15 }, 
-    "10121": { slot: "ExtraPassive", type: "Active", condition: "Every_2_Ex", duration: 10 }, 
-    "10126": { slot: "ExtraPassive", type: "PassiveStack", condition: "HeavyArmor_Striker" }, 
-    "10129": { slot: "ExtraPassive", type: "Active", duration: 35 } 
-};
 
 const getMaxValue = (valEntry) => {
     if (Array.isArray(valEntry)) return valEntry[valEntry.length - 1];
     return valEntry;
+};
+
+const extractVisualEffects = (effects, animationDuration, studentId) => {
+    const visualEffects = [];
+    if (!effects) return visualEffects;
+
+    if (ACCUMULATION_STUDENTS[studentId]) {
+        visualEffects.push({
+            type: "Accumulation",
+            stat: "Accumulation",
+            duration: ACCUMULATION_STUDENTS[studentId].duration,
+            delay: animationDuration 
+        });
+        return visualEffects;
+    }
+
+    effects.forEach(effect => {
+        const type = effect.Type;
+        const targets = Array.isArray(effect.Target) ? effect.Target : [effect.Target];
+        
+        if (["CrowdControl", "Knockback", "Dispel", "ConcentratedTarget", "CostChange"].includes(type)) return;
+
+        const duration = (effect.Duration || 0) / 1000;
+        let delay = (effect.ApplyFrame || 0) / 30;
+
+        if (type === "Summon") {
+            delay = Math.max(delay, animationDuration);
+        }
+
+        let shouldShow = false;
+        if (type === "Buff" || type === "Regen") {
+            if (duration > 0) shouldShow = true;
+        }
+        else if (type === "Summon" || type === "DamageDebuff" || type === "Special" || type === "Shield") {
+            if (duration > 0) shouldShow = true;
+        }
+
+        if (shouldShow) {
+            visualEffects.push({
+                type: type,
+                stat: effect.Stat || type,
+                duration: duration,
+                delay: delay,
+                target: targets.length === 1 ? targets[0] : "Self"
+            });
+        }
+    });
+    return visualEffects;
 };
 
 const parseStudentData = (data) => {
@@ -46,58 +77,35 @@ const parseStudentData = (data) => {
         };
     }
 
-    const visualEffects = [];
-    let requiresTarget = false;
+    const visualEffects = extractVisualEffects(effects, animationDuration, student.Id);
     let mainEffectDelay = 0;
+    const mainEffect = visualEffects.find(v => v.duration > 0);
+    if (mainEffect) mainEffectDelay = mainEffect.delay;
 
-    if (ACCUMULATION_STUDENTS[student.Id]) {
-        visualEffects.push({
-            type: "Accumulation",
-            stat: "Accumulation",
-            duration: ACCUMULATION_STUDENTS[student.Id].duration,
-            delay: animationDuration 
-        });
-    } 
-    else {
-        for (const effect of effects) {
-            const type = effect.Type;
-            const targets = Array.isArray(effect.Target) ? effect.Target : [effect.Target];
-            
-            if (["CrowdControl", "Knockback", "Dispel", "ConcentratedTarget", "CostChange"].includes(type)) continue;
+    const extraSkillsRaw = exSkill.ExtraSkills || [];
+    const extraSkills = extraSkillsRaw.map(es => {
+        const esAnimDuration = snapToFrame((es.Duration || 0) / 30);
+        const esCost = es.Cost && es.Cost.length >= 5 ? es.Cost[4] : (es.Cost ? es.Cost[0] : 0);
+        return {
+            name: es.Name,
+            type: "ExExtra",
+            cost: esCost,
+            animationDuration: esAnimDuration,
+            visualEffects: extractVisualEffects(es.Effects, esAnimDuration, student.Id)
+        };
+    });
 
-            const duration = (effect.Duration || 0) / 1000;
-            let delay = (effect.ApplyFrame || 0) / 30;
-
-            if (type === "Summon") {
-                delay = Math.max(delay, animationDuration);
-            }
-
-            let shouldShow = false;
-
-            if (type === "Buff" || type === "Regen") {
-                if (targets.length === 1) {
-                    const t = targets[0];
-                    if (t === "AllyMain" || (type === "Regen" && t === "Ally")) {
-                        requiresTarget = true;
-                    }
-                }
-                if (duration > 0) shouldShow = true;
-            }
-            else if (type === "Summon" || type === "DamageDebuff" || type === "Special" || type === "Shield") {
-                if (duration > 0) shouldShow = true;
-            }
-
-            if (shouldShow) {
-                visualEffects.push({
-                    type: type,
-                    stat: effect.Stat || type, // Store Stat for identification
-                    duration: duration,
-                    delay: delay,
-                    target: targets.length === 1 ? targets[0] : "Self"
-                });
-                if (duration > 0 && mainEffectDelay === 0) mainEffectDelay = delay;
-            }
-        }
+    const publicSkillRaw = student.Skills?.Public;
+    let publicSkill = null;
+    if (publicSkillRaw) {
+        const pubAnimDuration = snapToFrame((publicSkillRaw.Duration || 0) / 30);
+        publicSkill = {
+            name: publicSkillRaw.Name,
+            type: "Public",
+            cost: 0,
+            animationDuration: pubAnimDuration, 
+            visualEffects: extractVisualEffects(publicSkillRaw.Effects, pubAnimDuration, student.Id)
+        };
     }
 
     const regenEffects = [];
@@ -125,6 +133,11 @@ const parseStudentData = (data) => {
                 let dur = effect.Duration ? effect.Duration / 1000 : 0;
                 let delay = effect.ApplyFrame ? effect.ApplyFrame / 30 : 0;
 
+                // ExtraPassive fallback delay logic
+                if (slot === 'ExtraPassive' && delay === 0) {
+                    delay = animationDuration;
+                }
+
                 if (specLogic && specLogic.slot === slot) {
                     if (specLogic.type === 'Ignore') return;
                     logicType = specLogic.type;
@@ -149,10 +162,15 @@ const parseStudentData = (data) => {
                     duration: dur,
                     delay: delay,
                     condition,
-                    source: slot
+                    source: slot 
                 });
             }
         });
+    });
+
+    let requiresTarget = false;
+    visualEffects.forEach(ve => {
+        if (ve.target === "AllyMain") requiresTarget = true;
     });
 
     return {
@@ -164,6 +182,8 @@ const parseStudentData = (data) => {
       regenCost: student.RegenCost,
       devName: student.DevName,
       regenEffects,
+      extraSkills, 
+      publicSkill,
       exSkill: {
         name: exSkill.Name || "Unknown",
         type: effectType,

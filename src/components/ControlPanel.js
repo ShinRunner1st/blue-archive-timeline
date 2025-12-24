@@ -7,7 +7,8 @@ const ControlPanel = ({
     inputMinutes, setInputMinutes, inputSeconds, setInputSeconds, inputMillis, setInputMillis,
     stepFrame, jumpToNextCost, team, timelineEvents, setTeam, setTimelineEvents,
     currentCost, currentRateDisplay, isPassiveActive, isMaxCost,
-    allStudents, activeTeam, selectedSlot, onAddStudent, onSlotClick, onSlotContextMenu
+    allStudents, activeTeam, selectedSlot, onAddStudent, onSlotClick, onSlotContextMenu,
+    isPlaying, togglePlay // NEW props
 }) => {
   const fileInputRef = useRef(null);
 
@@ -66,11 +67,13 @@ const ControlPanel = ({
             <input type="number" value={inputMillis} onChange={e=>setInputMillis(e.target.value)} style={{width:'50px', background:'#222', color:'#fff', border:'1px solid #444', textAlign:'center', padding:'5px', borderRadius:'4px'}} placeholder="ms" />
           </div>
           <div style={{ display: 'flex', gap: '5px' }}>
-             <button onClick={() => stepFrame(-1)} className="btn-control">-1 Frame</button>
-             <button onClick={() => stepFrame(1)} className="btn-control">+1 Frame</button>
-             <button onClick={jumpToNextCost} className="btn-control special" disabled={isMaxCost}>Next Cost &gt;&gt;</button>
+             <button onClick={togglePlay} className="btn-control" style={{background: isPlaying ? '#ffeb3b' : '#333', color: isPlaying ? '#000' : '#fff', fontWeight:'bold', minWidth:'60px'}}>
+                 {isPlaying ? '⏸' : '▶'}
+             </button>
+             <button onClick={() => stepFrame(-1)} className="btn-control">-1 F</button>
+             <button onClick={() => stepFrame(1)} className="btn-control">+1 F</button>
+             <button onClick={jumpToNextCost} className="btn-control special" disabled={isMaxCost}>&gt;&gt; Cost</button>
           </div>
-          {/* FIX: Count UP for elapsed display only */}
           <div style={{ marginTop: '8px', fontSize: '0.75em', color: '#666', textAlign:'right' }}>Elapsed: {formatRaidTime(currentElapsed)}</div>
         </div>
         <div style={{flex: 1}}>

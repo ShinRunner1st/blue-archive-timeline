@@ -1,4 +1,5 @@
 import { COST_UNIT, MAX_COST, REGEN_START_DELAY } from './constants';
+import { resolveSkillState, checkAutoSkillTrigger } from './skillLogic';
 
 export const calculateRegenStats = (activeTeam) => {
     let base = 0;
@@ -25,8 +26,8 @@ export const calculateRegenStats = (activeTeam) => {
                 if (s.role === 'Special' && !eff.isFlat) {
                     if (val / 10000 > maxSpecialPercent) maxSpecialPercent = val / 10000;
                 } else {
-                    if (eff.isFlat) base += valueToAdd;
-                    else passivePercent += valueToAdd / 10000;
+                    if (eff.isFlat) base += val;
+                    else passivePercent += val / 10000;
                 }
             }
         }
@@ -35,29 +36,25 @@ export const calculateRegenStats = (activeTeam) => {
     return { base: base, percent: passivePercent };
 };
 
+export const getCurrentSkillData = (studentId, time, events, activeTeam) => {
+    const student = activeTeam.find(s => s.id === studentId);
+    if (!student) return null;
+    return resolveSkillState(studentId, time, events, student).skillData;
+};
+
 export const getEffectiveCost = (studentId, time, events, activeTeam) => {
     const student = activeTeam.find(s => s.id === studentId);
     if (!student) return 0;
     
-    let cost = student.exSkill.cost;
+    const { skillData } = resolveSkillState(studentId, time, events, student);
+    let cost = skillData ? skillData.cost : student.exSkill.cost;
+
     const sorted = events.filter(e => e.startTime <= time).sort((a,b) => a.startTime - b.startTime);
     const activeReductions = {};
 
     for (const e of sorted) {
         if (e.costReduction && e.targetId) {
-            // Find delay from visualEffects or single visualData
-            // Prefer visualEffects array
-            let delay = 0;
-            if (e.visualEffects) {
-                // Find main buff delay? Or just use 0? Usually CostChange applies with buff.
-                // We'll search for CostChange delay parsed in dataParser if available, 
-                // but currently it's stuck in 'visualData' or 'costReduction.delay' in dataParser.
-                // dataParser puts delay inside costReduction object.
-                delay = e.costReduction.delay || 0;
-            } else if (e.visualData) {
-                delay = e.visualData.delay;
-            }
-            
+            let delay = e.costReduction.delay || 0;
             const applyTime = e.startTime + delay;
             if (time >= applyTime) {
                 activeReductions[e.targetId] = { ...e.costReduction };
@@ -86,10 +83,11 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
         
         const student = activeTeam.find(s => s.id === e.studentId);
         if (student) {
-            const useCount = sortedEvents.filter(ev => ev.studentId === e.studentId && ev.startTime <= e.startTime).length;
             for (const eff of student.regenEffects) {
                 if (eff.type === 'Active') {
-                    if (eff.condition === 'Every_2_Ex' && useCount % 2 !== 0) continue;
+                    if (eff.source === 'Public' && e.skillType !== 'Public') continue;
+                    if (eff.source !== 'Public' && e.skillType === 'Public') continue;
+
                     const start = e.startTime + eff.delay;
                     const end = start + (eff.duration === -1 ? student.exSkill.effectDuration : eff.duration);
                     if (start > REGEN_START_DELAY && start < targetTime) points.add(start);
@@ -117,10 +115,11 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
             const student = activeTeam.find(s => s.id === e.studentId);
             if (!student) continue;
             
-            const useCount = sortedEvents.filter(ev => ev.studentId === e.studentId && ev.startTime <= e.startTime).length;
             for (const eff of student.regenEffects) {
                 if (eff.type === 'Active') {
-                    if (eff.condition === 'Every_2_Ex' && useCount % 2 !== 0) continue;
+                    if (eff.source === 'Public' && e.skillType !== 'Public') continue;
+                    if (eff.source !== 'Public' && e.skillType === 'Public') continue;
+
                     const dur = eff.duration === -1 ? student.exSkill.effectDuration : eff.duration;
                     const start = e.startTime + eff.delay;
                     const end = start + dur;
@@ -143,8 +142,10 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
         if (tCurr <= targetTime) {
             for (const e of sortedEvents) {
                 if (Math.abs(e.startTime - tCurr) < 0.0001) {
-                    const cost = getEffectiveCost(e.studentId, e.startTime, sortedEvents, activeTeam);
-                    currentCost -= cost;
+                    if (e.cost > 0) {
+                        const cost = getEffectiveCost(e.studentId, e.startTime, sortedEvents, activeTeam);
+                        currentCost -= cost;
+                    }
                 }
             }
         }
@@ -153,54 +154,79 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
     return currentCost;
 };
 
+// Reconcile Loop
+export const reconcileTimeline = (events, activeTeam) => {
+    let cleanEvents = events.filter(e => e.skillType !== 'Public');
+    cleanEvents.sort((a, b) => a.startTime - b.startTime);
+
+    const reconciledEvents = [];
+    const studentCounters = {}; 
+
+    cleanEvents.forEach(ev => {
+        if (!studentCounters[ev.studentId]) studentCounters[ev.studentId] = 0;
+
+        const studentData = activeTeam.find(s => s.id === ev.studentId);
+        
+        // 1. Determine Correct Skill State
+        const { skillData, skillType } = resolveSkillState(ev.studentId, ev.startTime, reconciledEvents, studentData);
+
+        ev.name = skillData.name;
+        ev.skillType = skillType;
+        ev.cost = skillData.cost;
+        ev.animationDuration = skillData.animationDuration;
+        ev.visualEffects = skillData.visualEffects;
+        ev.costReduction = skillData.costReduction;
+        
+        let maxVis = ev.animationDuration;
+        if (ev.visualEffects) ev.visualEffects.forEach(v => maxVis = Math.max(maxVis, v.delay + v.duration));
+        if (ev.regenData) maxVis = Math.max(maxVis, ev.regenData.delay + ev.regenData.duration);
+        ev.endTime = ev.startTime + maxVis;
+
+        reconciledEvents.push(ev);
+
+        // 2. Check Auto Trigger
+        const autoEvent = checkAutoSkillTrigger(ev, studentCounters[ev.studentId], studentData);
+        if (autoEvent) {
+            reconciledEvents.push(autoEvent);
+        }
+
+        studentCounters[ev.studentId]++;
+    });
+
+    return reconciledEvents;
+};
+
 export const resolveCascade = (events, activeTeam, regenStats) => {
-    // 1. Sort by time to process sequentially
-    const sorted = [...events].sort((a,b) => a.startTime - b.startTime);
-    const resolved = [];
+    const reconciled = reconcileTimeline(events, activeTeam);
+    const finalEvents = [];
     
-    for (let i = 0; i < sorted.length; i++) {
-        const ev = { ...sorted[i] };
+    for (let i = 0; i < reconciled.length; i++) {
+        const ev = reconciled[i];
+        if (ev.skillType === 'Public') {
+            finalEvents.push(ev);
+            continue;
+        }
+
         let validStart = ev.startTime;
         let attempts = 0;
         
-        // Find earliest valid time where cost is sufficient
         while (attempts < 200) { 
-            const avail = simulateCost(validStart, resolved, activeTeam, regenStats);
-            const needed = getEffectiveCost(ev.studentId, validStart, resolved, activeTeam);
-            
-            if (avail >= needed - 0.001) {
-                break;
-            } else {
-                validStart += 0.1; 
-                attempts++;
-            }
+            const avail = simulateCost(validStart, finalEvents, activeTeam, regenStats);
+            const needed = getEffectiveCost(ev.studentId, validStart, finalEvents, activeTeam);
+            if (avail >= needed - 0.001) break;
+            validStart += 0.1; attempts++;
         }
         
-        // Update Start and End times if shifted
         if (Math.abs(validStart - ev.startTime) > 0.001) {
             ev.startTime = Math.round(validStart * 30) / 30;
-            
             let maxVis = ev.animationDuration;
-            
-            // Handle Multiple Visual Effects (New Logic)
             if (ev.visualEffects && Array.isArray(ev.visualEffects)) {
-                ev.visualEffects.forEach(v => {
-                    maxVis = Math.max(maxVis, (v.delay || 0) + (v.duration || 0));
-                });
+                ev.visualEffects.forEach(v => maxVis = Math.max(maxVis, (v.delay||0) + (v.duration||0)));
             }
-            // Fallback for old/mixed structure
-            else if (ev.visualData) {
-                maxVis = Math.max(maxVis, (ev.visualData.delay || 0) + (ev.visualData.duration || 0));
-            }
-            
-            if (ev.regenData) {
-                maxVis = Math.max(maxVis, (ev.regenData.delay || 0) + (ev.regenData.duration || 0));
-            }
-            
+            if (ev.regenData) maxVis = Math.max(maxVis, (ev.regenData.delay||0) + (ev.regenData.duration||0));
             ev.endTime = ev.startTime + maxVis;
         }
-        
-        resolved.push(ev);
+        finalEvents.push(ev);
     }
-    return resolved;
+    return reconcileTimeline(finalEvents, activeTeam);
 };
