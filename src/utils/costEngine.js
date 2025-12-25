@@ -1,5 +1,5 @@
 import { COST_UNIT, MAX_COST, REGEN_START_DELAY } from './constants';
-import { resolveSkillState, checkAutoSkillTrigger } from './skillLogic';
+import { resolveSkillState, checkAutoSkillTrigger, generateAutoAttacks } from './skillLogic';
 
 export const calculateRegenStats = (activeTeam) => {
     let base = 0;
@@ -10,7 +10,7 @@ export const calculateRegenStats = (activeTeam) => {
         base += s.regenCost;
         for (const eff of s.regenEffects) {
             if (eff.type === 'Passive' || eff.type === 'PassiveStack') {
-                let val = 0;
+                let val = 0; 
                 if (eff.type === 'PassiveStack') {
                     if (eff.condition === 'School_RedWinter') {
                         const count = activeTeam.filter(t => t.id !== s.id && t.school === 'RedWinter').length;
@@ -42,6 +42,7 @@ export const getCurrentSkillData = (studentId, time, events, activeTeam) => {
     return resolveSkillState(studentId, time, events, student).skillData;
 };
 
+// COST REDUCTION LOGIC (Fixed)
 export const getEffectiveCost = (studentId, time, events, activeTeam) => {
     const student = activeTeam.find(s => s.id === studentId);
     if (!student) return 0;
@@ -49,25 +50,40 @@ export const getEffectiveCost = (studentId, time, events, activeTeam) => {
     const { skillData } = resolveSkillState(studentId, time, events, student);
     let cost = skillData ? skillData.cost : student.exSkill.cost;
 
-    const sorted = events.filter(e => e.startTime <= time).sort((a,b) => a.startTime - b.startTime);
-    const activeReductions = {};
+    // We must simulate the timeline up to 'time' to know which reductions are active/consumed
+    const timeline = events.filter(e => e.startTime < time - 0.0001).sort((a,b) => a.startTime - b.startTime);
+    
+    const activeReductions = {}; // Map<TargetID, {amount, uses}>
 
-    for (const e of sorted) {
-        if (e.costReduction && e.targetId) {
-            let delay = e.costReduction.delay || 0;
-            const applyTime = e.startTime + delay;
-            if (time >= applyTime) {
-                activeReductions[e.targetId] = { ...e.costReduction };
-            }
+    for (const e of timeline) {
+        // 1. Register new reduction
+        if (e.costReduction) {
+            // Target Logic: 'Self' or 'AllyMain' -> mapped to ID
+            // Assuming costReduction.target is raw string "AllyMain" or "Self"
+            // We need the actual ID. App.js puts specific targetId in e.targetId if manual target.
+            
+            let applyToIds = [];
+            if (e.costReduction.target === 'Self') applyToIds.push(e.studentId);
+            else if (e.targetId) applyToIds.push(e.targetId); // Targeted buff
+            
+            applyToIds.forEach(id => {
+                activeReductions[id] = { amount: e.costReduction.amount, uses: e.costReduction.uses };
+            });
         }
-        if (e.startTime < time && activeReductions[e.studentId]) {
-            activeReductions[e.studentId].uses--;
-            if (activeReductions[e.studentId].uses <= 0) delete activeReductions[e.studentId];
+
+        // 2. Consume reduction (if this event cost something)
+        if (e.cost > 0) {
+            if (activeReductions[e.studentId]) {
+                activeReductions[e.studentId].uses--;
+                if (activeReductions[e.studentId].uses <= 0) delete activeReductions[e.studentId];
+            }
         }
     }
 
+    // 3. Apply to current check
     if (activeReductions[studentId]) {
-        cost = Math.floor(cost * (1 - activeReductions[studentId].amount));
+        // Round Up as requested
+        cost = Math.ceil(cost * (1 - activeReductions[studentId].amount));
     }
     return Math.max(0, cost);
 };
@@ -90,8 +106,12 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
 
                     const start = e.startTime + eff.delay;
                     const end = start + (eff.duration === -1 ? student.exSkill.effectDuration : eff.duration);
-                    if (start > REGEN_START_DELAY && start < targetTime) points.add(start);
-                    if (end > REGEN_START_DELAY && end < targetTime) points.add(end);
+                    
+                    // FIX: Ensure Active Regen actually has a duration
+                    if (end > start) {
+                        if (start > REGEN_START_DELAY && start < targetTime) points.add(start);
+                        if (end > REGEN_START_DELAY && end < targetTime) points.add(end);
+                    }
                 }
             }
         }
@@ -108,15 +128,21 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
 
         let activeFlat = 0;
         let activePercent = 0;
-        const activeKeys = new Set();
+        const activeKeys = new Set(); // Prevent double counting same buff stack? No, separate stacks ok.
 
         for (const e of sortedEvents) {
             if (e.startTime > tMid) break;
             const student = activeTeam.find(s => s.id === e.studentId);
             if (!student) continue;
             
+            // Auto/Move don't trigger regen skills
+            if (e.skillType === 'Auto' || e.skillType === 'Move') continue;
+
+            const useCount = sortedEvents.filter(ev => ev.studentId === e.studentId && ev.startTime <= e.startTime).length;
+
             for (const eff of student.regenEffects) {
                 if (eff.type === 'Active') {
+                    if (eff.condition === 'Every_2_Ex' && useCount % 2 !== 0) continue;
                     if (eff.source === 'Public' && e.skillType !== 'Public') continue;
                     if (eff.source !== 'Public' && e.skillType === 'Public') continue;
 
@@ -125,7 +151,8 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
                     const end = start + dur;
                     
                     if (start <= tMid && end >= tCurr) {
-                        const key = `${student.id}-${eff.source}`;
+                        // Unique Key per Event+Effect to allow stacking if multiple casts overlap
+                        const key = `${e.id}-${eff.source}`; 
                         if (!activeKeys.has(key)) {
                             if (eff.isFlat) activeFlat += eff.value; else activePercent += eff.value/10000;
                             activeKeys.add(key);
@@ -139,8 +166,10 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
         const dt = tCurr - tPrev;
         currentCost = Math.min(MAX_COST, currentCost + (dt * speed / COST_UNIT));
 
+        // Deduct cost at tCurr
         if (tCurr <= targetTime) {
             for (const e of sortedEvents) {
+                // Use small epsilon for float comparison
                 if (Math.abs(e.startTime - tCurr) < 0.0001) {
                     if (e.cost > 0) {
                         const cost = getEffectiveCost(e.studentId, e.startTime, sortedEvents, activeTeam);
@@ -151,12 +180,12 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
         }
         tPrev = tCurr;
     }
-    return currentCost;
+    return Math.max(0, currentCost); // Prevent negative
 };
 
-// Reconcile Loop
+// ... reconcile/resolveCascade same as before ...
 export const reconcileTimeline = (events, activeTeam) => {
-    let cleanEvents = events.filter(e => e.skillType !== 'Public');
+    let cleanEvents = events.filter(e => e.skillType !== 'Public' && e.skillType !== 'Auto'); 
     cleanEvents.sort((a, b) => a.startTime - b.startTime);
 
     const reconciledEvents = [];
@@ -167,7 +196,11 @@ export const reconcileTimeline = (events, activeTeam) => {
 
         const studentData = activeTeam.find(s => s.id === ev.studentId);
         
-        // 1. Determine Correct Skill State
+        if (ev.skillType === 'Move') {
+            reconciledEvents.push(ev);
+            return; 
+        }
+
         const { skillData, skillType } = resolveSkillState(ev.studentId, ev.startTime, reconciledEvents, studentData);
 
         ev.name = skillData.name;
@@ -184,7 +217,6 @@ export const reconcileTimeline = (events, activeTeam) => {
 
         reconciledEvents.push(ev);
 
-        // 2. Check Auto Trigger
         const autoEvent = checkAutoSkillTrigger(ev, studentCounters[ev.studentId], studentData);
         if (autoEvent) {
             reconciledEvents.push(autoEvent);
@@ -196,23 +228,22 @@ export const reconcileTimeline = (events, activeTeam) => {
     return reconciledEvents;
 };
 
-export const resolveCascade = (events, activeTeam, regenStats) => {
+export const resolveCascade = (events, activeTeam, regenStats, raidDuration = 240) => {
     const reconciled = reconcileTimeline(events, activeTeam);
-    const finalEvents = [];
+    const cascadeEvents = [];
     
     for (let i = 0; i < reconciled.length; i++) {
         const ev = reconciled[i];
-        if (ev.skillType === 'Public') {
-            finalEvents.push(ev);
+        if (ev.skillType === 'Public' || ev.skillType === 'Move') {
+            cascadeEvents.push(ev);
             continue;
         }
 
         let validStart = ev.startTime;
         let attempts = 0;
-        
         while (attempts < 200) { 
-            const avail = simulateCost(validStart, finalEvents, activeTeam, regenStats);
-            const needed = getEffectiveCost(ev.studentId, validStart, finalEvents, activeTeam);
+            const avail = simulateCost(validStart, cascadeEvents, activeTeam, regenStats);
+            const needed = getEffectiveCost(ev.studentId, validStart, cascadeEvents, activeTeam);
             if (avail >= needed - 0.001) break;
             validStart += 0.1; attempts++;
         }
@@ -226,7 +257,11 @@ export const resolveCascade = (events, activeTeam, regenStats) => {
             if (ev.regenData) maxVis = Math.max(maxVis, (ev.regenData.delay||0) + (ev.regenData.duration||0));
             ev.endTime = ev.startTime + maxVis;
         }
-        finalEvents.push(ev);
+        cascadeEvents.push(ev);
     }
-    return reconcileTimeline(finalEvents, activeTeam);
+    
+    const finalUserEvents = reconcileTimeline(cascadeEvents, activeTeam);
+    const autoAttacks = generateAutoAttacks(finalUserEvents, activeTeam, raidDuration);
+
+    return [...finalUserEvents, ...autoAttacks];
 };
