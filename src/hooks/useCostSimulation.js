@@ -1,11 +1,13 @@
 import { useMemo } from 'react';
 import { calculateRegenStats, simulateCost, getEffectiveCost, getCurrentSkillData } from '../utils/costEngine';
 import { COST_UNIT, REGEN_START_DELAY, MAX_COST } from '../utils/constants';
+import { resolveTimelineEffects } from '../utils/effectResolver';
 
 export const useCostSimulation = (activeTeam, timelineEvents, raidDuration, currentElapsed) => {
 
   const regenStats = useMemo(() => calculateRegenStats(activeTeam), [activeTeam]);
 
+  // Status for Skill Card UI (Cost vs Effective Cost)
   const getStudentStatus = (studentId) => {
       const cost = getEffectiveCost(studentId, currentElapsed, timelineEvents, activeTeam);
       const currentSkill = getCurrentSkillData(studentId, currentElapsed, timelineEvents, activeTeam);
@@ -31,66 +33,62 @@ export const useCostSimulation = (activeTeam, timelineEvents, raidDuration, curr
       return getEffectiveCost(studentId, time, events, activeTeam);
   };
 
+  // --- COST GRAPH GENERATION (Resolver Based) ---
   const costGraphData = useMemo(() => {
-      const points = new Set([REGEN_START_DELAY, raidDuration]);
-      const sortedEvents = [...timelineEvents].filter(e => e.id).sort((a, b) => a.startTime - b.startTime);
-      for (const e of sortedEvents) {
-          if (e.startTime > REGEN_START_DELAY) points.add(e.startTime);
-          const student = activeTeam.find(s => s.id === e.studentId);
-          if (student) {
-              for (const eff of student.regenEffects) {
-                  if (eff.type === 'Active') {
-                      if (eff.source === 'Public' && e.skillType !== 'Public') continue;
-                      if (eff.source !== 'Public' && e.skillType === 'Public') continue;
-                      const start = e.startTime + eff.delay;
-                      const end = start + (eff.duration === -1 ? student.exSkill.effectDuration : eff.duration);
-                      if (start > REGEN_START_DELAY && start < raidDuration) points.add(start);
-                      if (end > REGEN_START_DELAY && end < raidDuration) points.add(end);
-                  }
-              }
-          }
-      }
+      // 1. Flatten logic into numbers
+      const { consumptionEvents, regenWindows } = resolveTimelineEffects(timelineEvents, activeTeam);
+
+      // 2. Build Time Points
+      const points = new Set([0, REGEN_START_DELAY, raidDuration]);
+      
+      // Add event times
+      consumptionEvents.forEach(c => {
+          if (c.time >= REGEN_START_DELAY && c.time <= raidDuration) points.add(c.time);
+      });
+      // Add window boundaries
+      regenWindows.forEach(w => {
+          if (w.start >= REGEN_START_DELAY && w.start <= raidDuration) points.add(w.start);
+          if (w.end >= REGEN_START_DELAY && w.end <= raidDuration) points.add(w.end);
+      });
 
       const sortedPoints = Array.from(points).sort((a, b) => a - b);
-      const graphPoints = [{ t: 0, v: 0 }, { t: REGEN_START_DELAY, v: 0 }];
+      const graphPoints = [{ t: 0, v: 0 }];
+      
       let currentCost = 0;
-      let tPrev = REGEN_START_DELAY;
+      let tPrev = 0;
 
+      // 3. Integration Loop
       for (let i = 0; i < sortedPoints.length; i++) {
           const tCurr = sortedPoints[i];
           if (tCurr <= tPrev) continue;
+
+          // Before Regen Start
+          if (tCurr <= REGEN_START_DELAY) {
+              graphPoints.push({ t: tCurr, v: 0 });
+              tPrev = tCurr;
+              continue;
+          }
+
+          // Calculate Rate at mid-point
           const tMid = tPrev + 0.001;
           let activeFlat = 0;
           let activePercent = 0;
-          const activeKeys = new Set();
 
-          for (const e of sortedEvents) {
-              if (e.startTime > tMid) break;
-              const student = activeTeam.find(s => s.id === e.studentId);
-              if (!student) continue;
-              for (const eff of student.regenEffects) {
-                  if (eff.type === 'Active') {
-                      if (eff.source === 'Public' && e.skillType !== 'Public') continue;
-                      if (eff.source !== 'Public' && e.skillType === 'Public') continue;
-                      const dur = eff.duration === -1 ? student.exSkill.effectDuration : eff.duration;
-                      const start = e.startTime + eff.delay;
-                      const end = start + dur;
-                      if (start <= tMid && end >= tCurr) {
-                          const key = `${student.id}-${eff.source}`;
-                          if (!activeKeys.has(key)) {
-                              if (eff.isFlat) activeFlat += eff.value; else activePercent += eff.value/10000;
-                              activeKeys.add(key);
-                          }
-                      }
-                  }
+          for (const w of regenWindows) {
+              if (w.start <= tMid && w.end >= tCurr) {
+                  if (w.isFlat) activeFlat += w.value;
+                  else activePercent += w.value / 10000;
               }
           }
 
           const speed = (regenStats.base + activeFlat) * (1 + regenStats.percent + activePercent);
           const dt = tCurr - tPrev;
+
+          // Add Cost (Clamped)
           if (currentCost < MAX_COST && speed > 0) {
               const timeToMax = (MAX_COST - currentCost) / (speed / COST_UNIT);
               if (timeToMax <= dt) {
+                  // Hit cap mid-interval
                   graphPoints.push({ t: tPrev + timeToMax, v: MAX_COST });
                   currentCost = MAX_COST;
               } else {
@@ -99,50 +97,40 @@ export const useCostSimulation = (activeTeam, timelineEvents, raidDuration, curr
           } else {
               currentCost = Math.min(MAX_COST, currentCost + (dt * speed / COST_UNIT));
           }
+
+          // Add point before consumption
           graphPoints.push({ t: tCurr, v: currentCost });
 
-          for (const e of sortedEvents) {
-              if (Math.abs(e.startTime - tCurr) < 0.0001) {
-                  if(e.cost > 0) {
-                      const cost = getEffectiveCost(e.studentId, e.startTime, sortedEvents, activeTeam);
-                      currentCost = Math.max(0, currentCost - cost);
-                  }
+          // Consume Cost (Instant)
+          for (const c of consumptionEvents) {
+              if (Math.abs(c.time - tCurr) < 0.0001) {
+                  currentCost = Math.max(0, currentCost - c.cost);
+                  // Add point after consumption to create vertical drop
                   graphPoints.push({ t: tCurr, v: currentCost });
               }
           }
+
           tPrev = tCurr;
       }
       return graphPoints;
   }, [timelineEvents, activeTeam, regenStats, raidDuration]);
 
-  // Rate Display
+  // --- CURRENT RATE DISPLAY (Resolver Based) ---
   const currentRateDisplay = useMemo(() => {
       const { base, percent } = regenStats;
       let activeFlat = 0;
       let activePercent = 0;
-      const activeKeys = new Set();
       
-      for (const e of timelineEvents) {
-          if (e.startTime > currentElapsed) continue;
-          const student = activeTeam.find(s=>s.id===e.studentId);
-          if(!student) continue;
-          
-          for (const eff of student.regenEffects) {
-              if (eff.type === 'Active') {
-                  if (eff.source === 'Public' && e.skillType !== 'Public') continue;
-                  if (eff.source !== 'Public' && e.skillType === 'Public') continue;
-                  const dur = eff.duration === -1 ? student.exSkill.effectDuration : eff.duration;
-                  const start = e.startTime + eff.delay;
-                  if (currentElapsed >= start && currentElapsed < start + dur) {
-                      const key = `${student.id}-${eff.source}`;
-                      if (!activeKeys.has(key)) {
-                          if (eff.isFlat) activeFlat += eff.value; else activePercent += eff.value / 10000;
-                          activeKeys.add(key);
-                      }
-                  }
-              }
+      // Use Resolver to find active windows at current time
+      const { regenWindows } = resolveTimelineEffects(timelineEvents, activeTeam);
+      
+      for (const w of regenWindows) {
+          if (currentElapsed >= w.start && currentElapsed < w.end) {
+              if (w.isFlat) activeFlat += w.value;
+              else activePercent += w.value / 10000;
           }
       }
+
       return (base + activeFlat) * (1 + percent + activePercent) / COST_UNIT;
   }, [regenStats, currentElapsed, timelineEvents, activeTeam]);
 

@@ -1,6 +1,21 @@
 import { COST_UNIT, MAX_COST, REGEN_START_DELAY } from './constants';
-import { resolveSkillState, checkAutoSkillTrigger } from './skillLogic';
+import { resolveSkillState } from './skillLogic';
+import { resolveTimelineEffects, calculateEffectiveCost } from './effectResolver';
 
+// --- API ALIASES ---
+export const getEffectiveCost = (studentId, time, events, activeTeam) => {
+    return calculateEffectiveCost(studentId, time, events, activeTeam);
+};
+export const getEffectiveCostAtTime = (studentId, time, events, activeTeam) => {
+    return calculateEffectiveCost(studentId, time, events, activeTeam);
+};
+export const getCurrentSkillData = (studentId, time, events, activeTeam) => {
+    const student = activeTeam.find(s => s.id === studentId);
+    if (!student) return null;
+    return resolveSkillState(studentId, time, events, student).skillData;
+};
+
+// --- CORE ---
 export const calculateRegenStats = (activeTeam) => {
     let base = 0;
     let passivePercent = 0;
@@ -9,8 +24,9 @@ export const calculateRegenStats = (activeTeam) => {
     activeTeam.forEach(s => {
         base += s.regenCost;
         for (const eff of s.regenEffects) {
+            // ONLY STATIC PASSIVES HERE
             if (eff.type === 'Passive' || eff.type === 'PassiveStack') {
-                let val = 0;
+                let val = 0; 
                 if (eff.type === 'PassiveStack') {
                     if (eff.condition === 'School_RedWinter') {
                         const count = activeTeam.filter(t => t.id !== s.id && t.school === 'RedWinter').length;
@@ -32,70 +48,25 @@ export const calculateRegenStats = (activeTeam) => {
             }
         }
     });
+    
     passivePercent += maxSpecialPercent;
     return { base: base, percent: passivePercent };
-};
-
-export const getCurrentSkillData = (studentId, time, events, activeTeam) => {
-    const student = activeTeam.find(s => s.id === studentId);
-    if (!student) return null;
-    return resolveSkillState(studentId, time, events, student).skillData;
-};
-
-export const getEffectiveCost = (studentId, time, events, activeTeam) => {
-    const student = activeTeam.find(s => s.id === studentId);
-    if (!student) return 0;
-    
-    const { skillData } = resolveSkillState(studentId, time, events, student);
-    let cost = skillData ? skillData.cost : student.exSkill.cost;
-
-    const sorted = events.filter(e => e.startTime <= time).sort((a,b) => a.startTime - b.startTime);
-    const activeReductions = {};
-
-    for (const e of sorted) {
-        if (e.costReduction && e.targetId) {
-            let delay = e.costReduction.delay || 0;
-            const applyTime = e.startTime + delay;
-            if (time >= applyTime) {
-                activeReductions[e.targetId] = { ...e.costReduction };
-            }
-        }
-        if (e.startTime < time && activeReductions[e.studentId]) {
-            activeReductions[e.studentId].uses--;
-            if (activeReductions[e.studentId].uses <= 0) delete activeReductions[e.studentId];
-        }
-    }
-
-    if (activeReductions[studentId]) {
-        cost = Math.floor(cost * (1 - activeReductions[studentId].amount));
-    }
-    return Math.max(0, cost);
 };
 
 export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
     if (targetTime < REGEN_START_DELAY) return 0;
 
+    // 1. DELEGATE TO RESOLVER
+    const { consumptionEvents, regenWindows } = resolveTimelineEffects(events, activeTeam);
+
     const points = new Set([REGEN_START_DELAY, targetTime]);
-    const sortedEvents = [...events].sort((a,b) => a.startTime - b.startTime);
-
-    for (const e of sortedEvents) {
-        if (e.startTime > REGEN_START_DELAY && e.startTime <= targetTime) points.add(e.startTime);
-        
-        const student = activeTeam.find(s => s.id === e.studentId);
-        if (student) {
-            for (const eff of student.regenEffects) {
-                if (eff.type === 'Active') {
-                    if (eff.source === 'Public' && e.skillType !== 'Public') continue;
-                    if (eff.source !== 'Public' && e.skillType === 'Public') continue;
-
-                    const start = e.startTime + eff.delay;
-                    const end = start + (eff.duration === -1 ? student.exSkill.effectDuration : eff.duration);
-                    if (start > REGEN_START_DELAY && start < targetTime) points.add(start);
-                    if (end > REGEN_START_DELAY && end < targetTime) points.add(end);
-                }
-            }
-        }
-    }
+    consumptionEvents.forEach(c => {
+        if (c.time > REGEN_START_DELAY && c.time <= targetTime) points.add(c.time);
+    });
+    regenWindows.forEach(w => {
+        if (w.start > REGEN_START_DELAY && w.start < targetTime) points.add(w.start);
+        if (w.end > REGEN_START_DELAY && w.end < targetTime) points.add(w.end);
+    });
 
     const sortedPoints = Array.from(points).sort((a, b) => a - b);
     let currentCost = 0;
@@ -104,34 +75,15 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
     for (let i = 0; i < sortedPoints.length; i++) {
         const tCurr = sortedPoints[i];
         if (tCurr <= tPrev) continue;
+        
         const tMid = tPrev + 0.001;
-
         let activeFlat = 0;
         let activePercent = 0;
-        const activeKeys = new Set();
 
-        for (const e of sortedEvents) {
-            if (e.startTime > tMid) break;
-            const student = activeTeam.find(s => s.id === e.studentId);
-            if (!student) continue;
-            
-            for (const eff of student.regenEffects) {
-                if (eff.type === 'Active') {
-                    if (eff.source === 'Public' && e.skillType !== 'Public') continue;
-                    if (eff.source !== 'Public' && e.skillType === 'Public') continue;
-
-                    const dur = eff.duration === -1 ? student.exSkill.effectDuration : eff.duration;
-                    const start = e.startTime + eff.delay;
-                    const end = start + dur;
-                    
-                    if (start <= tMid && end >= tCurr) {
-                        const key = `${student.id}-${eff.source}`;
-                        if (!activeKeys.has(key)) {
-                            if (eff.isFlat) activeFlat += eff.value; else activePercent += eff.value/10000;
-                            activeKeys.add(key);
-                        }
-                    }
-                }
+        for (const w of regenWindows) {
+            if (w.start <= tMid && w.end >= tCurr) {
+                if (w.isFlat) activeFlat += w.value;
+                else activePercent += w.value / 10000;
             }
         }
 
@@ -140,93 +92,45 @@ export const simulateCost = (targetTime, events, activeTeam, regenStats) => {
         currentCost = Math.min(MAX_COST, currentCost + (dt * speed / COST_UNIT));
 
         if (tCurr <= targetTime) {
-            for (const e of sortedEvents) {
-                if (Math.abs(e.startTime - tCurr) < 0.0001) {
-                    if (e.cost > 0) {
-                        const cost = getEffectiveCost(e.studentId, e.startTime, sortedEvents, activeTeam);
-                        currentCost -= cost;
-                    }
+            for (const c of consumptionEvents) {
+                if (Math.abs(c.time - tCurr) < 0.0001) {
+                    currentCost = Math.max(0, currentCost - c.cost);
                 }
             }
         }
         tPrev = tCurr;
     }
+
     return currentCost;
 };
 
-// Reconcile Loop
-export const reconcileTimeline = (events, activeTeam) => {
-    let cleanEvents = events.filter(e => e.skillType !== 'Public');
-    cleanEvents.sort((a, b) => a.startTime - b.startTime);
-
-    const reconciledEvents = [];
-    const studentCounters = {}; 
-
-    cleanEvents.forEach(ev => {
-        if (!studentCounters[ev.studentId]) studentCounters[ev.studentId] = 0;
-
-        const studentData = activeTeam.find(s => s.id === ev.studentId);
-        
-        // 1. Determine Correct Skill State
-        const { skillData, skillType } = resolveSkillState(ev.studentId, ev.startTime, reconciledEvents, studentData);
-
-        ev.name = skillData.name;
-        ev.skillType = skillType;
-        ev.cost = skillData.cost;
-        ev.animationDuration = skillData.animationDuration;
-        ev.visualEffects = skillData.visualEffects;
-        ev.costReduction = skillData.costReduction;
-        
-        let maxVis = ev.animationDuration;
-        if (ev.visualEffects) ev.visualEffects.forEach(v => maxVis = Math.max(maxVis, v.delay + v.duration));
-        if (ev.regenData) maxVis = Math.max(maxVis, ev.regenData.delay + ev.regenData.duration);
-        ev.endTime = ev.startTime + maxVis;
-
-        reconciledEvents.push(ev);
-
-        // 2. Check Auto Trigger
-        const autoEvent = checkAutoSkillTrigger(ev, studentCounters[ev.studentId], studentData);
-        if (autoEvent) {
-            reconciledEvents.push(autoEvent);
-        }
-
-        studentCounters[ev.studentId]++;
-    });
-
-    return reconciledEvents;
-};
-
+// ... resolveCascade unchanged (calls simulateCost) ...
 export const resolveCascade = (events, activeTeam, regenStats) => {
-    const reconciled = reconcileTimeline(events, activeTeam);
+    const reconciled = events.filter(e => e.skillType !== 'Public' && e.skillType !== 'Auto').sort((a,b)=>a.startTime-b.startTime);
     const finalEvents = [];
     
+    // Simple cascade for User Events
     for (let i = 0; i < reconciled.length; i++) {
         const ev = reconciled[i];
-        if (ev.skillType === 'Public') {
+        if (ev.skillType === 'Move') {
             finalEvents.push(ev);
             continue;
         }
-
         let validStart = ev.startTime;
         let attempts = 0;
-        
         while (attempts < 200) { 
             const avail = simulateCost(validStart, finalEvents, activeTeam, regenStats);
-            const needed = getEffectiveCost(ev.studentId, validStart, finalEvents, activeTeam);
+            const needed = calculateEffectiveCost(ev.studentId, validStart, finalEvents, activeTeam);
             if (avail >= needed - 0.001) break;
             validStart += 0.1; attempts++;
         }
-        
         if (Math.abs(validStart - ev.startTime) > 0.001) {
             ev.startTime = Math.round(validStart * 30) / 30;
             let maxVis = ev.animationDuration;
-            if (ev.visualEffects && Array.isArray(ev.visualEffects)) {
-                ev.visualEffects.forEach(v => maxVis = Math.max(maxVis, (v.delay||0) + (v.duration||0)));
-            }
-            if (ev.regenData) maxVis = Math.max(maxVis, (ev.regenData.delay||0) + (ev.regenData.duration||0));
+            if (ev.visualEffects) ev.visualEffects.forEach(v => maxVis = Math.max(maxVis, (v.delay||0) + (v.duration||0)));
             ev.endTime = ev.startTime + maxVis;
         }
         finalEvents.push(ev);
     }
-    return reconcileTimeline(finalEvents, activeTeam);
+    return finalEvents;
 };

@@ -13,11 +13,25 @@ const TYPE_COLORS = {
     Shield: '#fbc02d', Knockback: '#6d4c41', Dispel: '#455a64', CostChange: '#0288d1',
     ConcentratedTarget: '#d84315', Accumulation: '#e64a19', 
     Public: '#ec407a', 
+    Auto: '#9e9e9e', 
+    Reload: '#ef6c00', 
+    Move: '#78909c', 
+    Attack: '#d32f2f', // Firing
+    Wait: '#616161', // Enter/Rest
     Unknown: '#616161'
 };
 
-const getSkillColor = (type) => TYPE_COLORS[type] || TYPE_COLORS.Unknown;
+const getSkillColor = (type, subType) => {
+    if (type === 'Move') return TYPE_COLORS.Move;
+    if (subType === 'Reload') return TYPE_COLORS.Reload;
+    if (subType === 'Ing') return TYPE_COLORS.Attack;
+    if (subType === 'Enter' || subType === 'End' || subType === 'Delay' || subType === 'Start') return TYPE_COLORS.Wait;
+    if (type === 'Auto') return TYPE_COLORS.Auto;
+    if (type === 'Public') return TYPE_COLORS.Public;
+    return TYPE_COLORS[type] || TYPE_COLORS.Unknown;
+};
 
+// ... CostGraph (unchanged) ...
 const CostGraph = ({ data, totalWidth, height, onMouseDown, pxPerSec }) => {
     if (!data || data.length === 0) return null;
     const validData = data.filter(d => !isNaN(d.v) && !isNaN(d.t));
@@ -64,7 +78,7 @@ const Timeline = ({
                   if (targetRowIndex === rowIndex) {
                       visualChunks.push({
                           eventId: ev.id, name: ev.name, start: ev.startTime + ve.delay, end: ev.startTime + ve.delay + ve.duration,
-                          delay: ve.delay, type: ve.type, stat: ve.stat, duration: ve.duration, index: vIndex
+                          delay: ve.delay, type: ve.type, stat: ve.stat, duration: ve.duration, index: vIndex, channel: ve.channel
                       });
                   }
               });
@@ -77,18 +91,24 @@ const Timeline = ({
           let placed = false;
           for (let i = 0; i < lanes.length; i++) {
               const laneChunks = lanes[i].chunks;
-              const isSame = laneChunks.some(c => c.name === chunk.name && c.type === chunk.type && c.stat === chunk.stat);
+              const isSame = laneChunks.some(c => (c.channel!==undefined && chunk.channel!==undefined) ? c.channel===chunk.channel : (c.name===chunk.name && c.type===chunk.type && c.stat===chunk.stat));
               if (lanes[i].end <= chunk.start + 0.01 || isSame) {
                   lanes[i].end = Math.max(lanes[i].end, chunk.end);
                   lanes[i].chunks.push(chunk);
-                  chunkLanes.set(chunk, i);
                   placed = true; break;
               }
           }
-          if (!placed) { lanes.push({ end: chunk.end, chunks: [chunk] }); chunkLanes.set(chunk, lanes.length - 1); }
+          if (!placed) { lanes.push({ end: chunk.end, chunks: [chunk] }); }
       });
-      const calculatedHeight = Math.max(BASE_ROW_HEIGHT, 40 + (lanes.length * 22));
-      return { height: calculatedHeight, chunkLanes, sortedChunks: sorted };
+      const calculatedHeight = Math.max(BASE_ROW_HEIGHT, 50 + (lanes.length * 22));
+      return { height: calculatedHeight, chunkLanes: new Map(), sortedChunks: sorted, lanes };
+  });
+  
+  rowLayouts.forEach(layout => {
+      layout.chunkLanes = new Map();
+      layout.lanes.forEach((lane, laneIdx) => {
+          lane.chunks.forEach(chunk => layout.chunkLanes.set(chunk, laneIdx));
+      });
   });
 
   const rowTops = [0];
@@ -105,33 +125,24 @@ const Timeline = ({
   
   const handleEventMouseDown = (e, event) => { 
       mouseDownPos.current = { x: e.clientX, y: e.clientY };
-
-      if (e.button === 1) { 
-          e.preventDefault(); e.stopPropagation();
-          onEditEvent(event);
-          return;
-      }
-
-      if (event.skillType === 'Public') {
+      if (e.button === 1) { e.preventDefault(); e.stopPropagation(); onEditEvent(event); return; }
+      
+      // STRICT: Auto / Public cannot be dragged
+      if (event.skillType === 'Auto' || event.skillType === 'Public') {
           e.preventDefault(); e.stopPropagation(); return;
       }
 
       if (interactionMode === 'remove') {
-          if (e.button === 0) {
-              e.stopPropagation(); e.preventDefault();
-              onDeleteEvent(event.id);
-          }
+          if (e.button === 0) { e.stopPropagation(); e.preventDefault(); onDeleteEvent(event.id); }
           return;
       }
-
       if (interactionMode === 'edit') {
           if (e.button === 0) { 
               e.stopPropagation(); e.preventDefault();
               const student = activeTeam.find(s=>s.id===event.studentId);
               setDragState({ eventId: event.id, startX: e.clientX, originalStartTime: event.startTime, studentId: event.studentId, cost: student?.exSkill.cost }); 
           } else if (e.button === 2) { 
-              e.stopPropagation(); e.preventDefault();
-              onDeleteEvent(event.id);
+              e.stopPropagation(); e.preventDefault(); onDeleteEvent(event.id);
           }
           return;
       }
@@ -157,33 +168,22 @@ const Timeline = ({
     return () => { window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
   }, [dragState, onUpdateEvent, zoomLevel, calculateCostAtTime, getEffectiveCostAtTime]);
 
-  // --- UPDATED PANNING LOGIC ---
   const handlePanMouseDown = (e) => { 
-      const isLeft = e.button === 0;
-      const isRight = e.button === 2;
-      
+      const isLeft = e.button === 0; const isRight = e.button === 2;
       let allowPan = false;
       if (interactionMode === 'normal' && (isLeft || isRight)) allowPan = true;
       else if (interactionMode === 'edit' && isRight) allowPan = true;
-      else if (interactionMode === 'remove' && isRight) allowPan = true; // FIX: Allow Right Pan in Remove Mode
-
-      if (allowPan) {
-          e.preventDefault(); 
-          setIsPanning(true); 
-          setPanStart({ x: e.clientX, y: e.clientY, scrollLeft: scrollRef.current.scrollLeft, scrollTop: scrollRef.current.scrollTop }); 
-      }
+      else if (interactionMode === 'remove' && isRight) allowPan = true; 
+      if (allowPan) { e.preventDefault(); setIsPanning(true); setPanStart({ x: e.clientX, y: e.clientY, scrollLeft: scrollRef.current.scrollLeft, scrollTop: scrollRef.current.scrollTop }); }
   };
-
   useEffect(() => { if (!isPanning) return; const mm = (e) => { const dx = e.clientX - panStart.x; const dy = e.clientY - panStart.y; if (scrollRef.current) { scrollRef.current.scrollLeft = panStart.scrollLeft - dx; scrollRef.current.scrollTop = panStart.scrollTop - dy; } }; const mu = () => setIsPanning(false); window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu); return () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); }; }, [isPanning, panStart]);
 
   const handleContextMenu = (e, event) => {
       e.preventDefault();
       const dist = Math.hypot(e.clientX - mouseDownPos.current.x, e.clientY - mouseDownPos.current.y);
       if (dist > 5) return; 
-
-      if (event.skillType === 'Public') return;
+      if (event.skillType === 'Public' || event.skillType === 'Auto') return;
       if (interactionMode === 'remove') return;
-
       onEditEvent(event);
   };
 
@@ -197,7 +197,7 @@ const Timeline = ({
 
   return (
     <div style={{ border: '1px solid #444', background: '#222', userSelect: 'none', display: 'flex', flexDirection: 'column', borderRadius:'4px', height: '100%' }}>
-      
+      {/* ... Header Same as before ... */}
       <div style={{ padding: '8px 12px', background: '#1a1a1a', borderBottom: '1px solid #444', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
          <div style={{display:'flex', gap:'20px', alignItems:'center', flex: 1}}>
              <div style={{display:'flex', gap:'10px', alignItems:'center'}}>
@@ -215,13 +215,10 @@ const Timeline = ({
              <span style={{color:'#888', fontSize:'0.75em', marginRight:'5px'}}>x{(zoomLevel / BASE_ZOOM).toFixed(1)}</span>
              <button onClick={() => handleZoom(-5)} className="btn-tiny" title="Zoom Out">-</button>
              <button onClick={() => handleZoom(5)} className="btn-tiny" title="Zoom In">+</button>
-             
              <div style={{width:'1px', height:'20px', background:'#444', margin:'0 5px'}}></div>
-             
              <button onClick={()=>setInteractionMode('normal')} className="btn-tiny" style={getModeBtnStyle('normal')}>Normal</button>
              <button onClick={()=>setInteractionMode('edit')} className="btn-tiny" style={getModeBtnStyle('edit')}>Edit</button>
              <button onClick={()=>setInteractionMode('remove')} className="btn-tiny" style={getModeBtnStyle('remove')}>Remove</button>
-
              <div style={{width:'1px', height:'20px', background:'#444', margin:'0 5px'}}></div>
              <button onClick={onClearEvents} className="btn-tiny" style={{background:'#c62828', borderColor:'#e53935', color:'white', fontWeight:'bold'}}>Clear</button>
          </div>
@@ -265,22 +262,29 @@ const Timeline = ({
                      const visibleDuration = Math.min(event.animationDuration, raidDuration - event.startTime);
                      const animWidth = Math.max(0, visibleDuration * zoomLevel);
                      if (animWidth <= 0) return null;
-                     const bars = [];
                      
-                     const tooltip = `[${event.name}]\nType: ${event.skillType === 'Public' ? 'Auto (Public)' : 'Casting'}\nStart: ${formatTimeFn(event.startTime, raidDuration)}\nEnd: ${formatTimeFn(event.startTime + event.animationDuration, raidDuration)}\nDuration: ${event.animationDuration}s\nCost: ${event.cost}`;
-                     const bgColor = event.skillType === 'Public' ? '#ec407a' : '#555';
+                     const tooltip = `[${event.name}]\nType: ${event.skillType === 'Public' ? 'Auto (Public)' : (event.skillType==='Auto' ? 'Auto-Attack' : 'Casting')}\n${event.subType?`Action: ${event.subType}\n`:''}Start: ${formatTimeFn(event.startTime, raidDuration)}\nEnd: ${formatTimeFn(event.startTime + event.animationDuration, raidDuration)}\nDuration: ${event.animationDuration}s\nCost: ${event.cost}`;
+                     
+                     let bgColor = '#555';
+                     if(event.skillType==='Public') bgColor = getSkillColor('Public');
+                     else if(event.skillType==='Auto' || event.skillType==='Move') bgColor = getSkillColor(event.skillType, event.subType);
+
+                     // Lane logic
+                     const topOffset = (event.skillType === 'Public' || event.skillType === 'Auto' || event.skillType === 'Move') ? 20 : 2;
                      
                      let cursorStyle = 'default';
                      if (interactionMode === 'remove') cursorStyle = 'not-allowed';
-                     else if (interactionMode === 'edit' && event.skillType !== 'Public') cursorStyle = 'grab';
+                     else if (interactionMode === 'edit' && (event.skillType !== 'Public' && event.skillType !== 'Auto')) cursorStyle = 'grab';
 
+                     const bars = [];
                      bars.push(
                          <div key={`anim-${event.id}`} 
                              onMouseDown={(e) => handleEventMouseDown(e, event)} 
                              onContextMenu={(e) => handleContextMenu(e, event)}
                              title={tooltip}
-                             style={{ position: 'absolute', left: `${event.startTime * zoomLevel}px`, width: `${animWidth}px`, top: `${rowTops[casterRowIndex] + 2}px`, height: `16px`, background: bgColor, border: '1px solid rgba(255,255,255,0.2)', borderRadius: '2px', color: 'white', fontSize: '9px', fontWeight: 'bold', display: 'flex', alignItems: 'center', paddingLeft: '3px', cursor: cursorStyle, overflow: 'hidden', whiteSpace: 'nowrap', zIndex: 20, opacity: 0.9, boxSizing: 'border-box' }}>Casting...</div>
+                             style={{ position: 'absolute', left: `${event.startTime * zoomLevel}px`, width: `${animWidth}px`, top: `${rowTops[casterRowIndex] + topOffset}px`, height: `16px`, background: bgColor, border: '1px solid rgba(255,255,255,0.2)', borderRadius: '2px', color: 'white', fontSize: '9px', fontWeight: 'bold', display: 'flex', alignItems: 'center', paddingLeft: '3px', cursor: cursorStyle, overflow: 'hidden', whiteSpace: 'nowrap', zIndex: 20, opacity: 0.9, boxSizing: 'border-box' }}>{event.name || event.subType || "Casting"}</div>
                      );
+                     
                      if (event.regenData && event.regenData.duration > 0) {
                          const regenStart = event.startTime + event.regenData.delay;
                          const regenDur = Math.min(event.regenData.duration, raidDuration - regenStart);
@@ -288,8 +292,8 @@ const Timeline = ({
                          if (regenWidth > 0) {
                              const regenTooltip = `[Cost Regen]\nStart: ${formatTimeFn(regenStart, raidDuration)}\nEnd: ${formatTimeFn(regenStart + event.regenData.duration, raidDuration)}\nDuration: ${event.regenData.duration}s`;
                              bars.push(
-                                 <div key={`regen-${event.id}`} onMouseDown={(e) => handleEventMouseDown(e, event)}
-                                     title={regenTooltip} style={{ position: 'absolute', left: `${regenStart * zoomLevel}px`, width: `${regenWidth}px`, top: `${rowTops[casterRowIndex] + 24}px`, height: `1px`, background: '#00e5ff', boxShadow: '0 0 2px #00e5ff', zIndex: 25, cursor: cursorStyle, boxSizing: 'border-box' }} />
+                                 <div key={`regen-${event.id}`} onMouseDown={(e) => handleEventMouseDown(e, event)} onContextMenu={(e) => handleContextMenu(e, event)}
+                                     title={regenTooltip} style={{ position: 'absolute', left: `${regenStart * zoomLevel}px`, width: `${regenWidth}px`, top: `${rowTops[casterRowIndex] + topOffset + 18}px`, height: `1px`, background: '#00e5ff', boxShadow: '0 0 2px #00e5ff', zIndex: 25, cursor: cursorStyle, boxSizing: 'border-box' }} />
                              );
                          }
                      }
@@ -300,7 +304,7 @@ const Timeline = ({
                      const event = events.find(e => e.id === chunk.eventId);
                      if (!event) return null;
                      const lane = chunkLanes.get(chunk) || 0;
-                     const startY = 30; const laneHeight = 18; const topOffset = startY + (lane * (laneHeight + 4));
+                     const startY = 45; const laneHeight = 18; const topOffset = startY + (lane * (laneHeight + 4));
                      const visibleDuration = Math.min(chunk.duration, raidDuration - chunk.start);
                      const boxWidth = Math.max(0, visibleDuration * zoomLevel);
                      if (boxWidth <= 0) return null;

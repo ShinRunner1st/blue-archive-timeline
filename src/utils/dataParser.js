@@ -48,7 +48,8 @@ const extractVisualEffects = (effects, animationDuration, studentId) => {
                 stat: effect.Stat || type,
                 duration: duration,
                 delay: delay,
-                target: targets.length === 1 ? targets[0] : "Self"
+                target: targets.length === 1 ? targets[0] : "Self",
+                channel: effect.Channel
             });
         }
     });
@@ -108,6 +109,31 @@ const parseStudentData = (data) => {
         };
     }
 
+    // --- NORMAL ATTACK STATE MACHINE DATA ---
+    const normalSkillRaw = student.Skills?.Normal || {};
+    const normalFrames = normalSkillRaw.Frames || {};
+    
+    // Safety defaults
+    const ammoCount = (student.AmmoCount && student.AmmoCount > 0) ? student.AmmoCount : 1; 
+    const ammoCost = (student.AmmoCost && student.AmmoCost > 0) ? student.AmmoCost : 1;
+
+    let normalAttack = null;
+    // Only Strikers have normal attacks
+    if (student.SquadType === 'Main') {
+        normalAttack = {
+            ammoCount: ammoCount,
+            ammoCost: ammoCost,
+            frames: {
+                enter: (normalFrames.AttackEnterDuration || 0) / 30,
+                start: (normalFrames.AttackStartDuration || 0) / 30,
+                end: (normalFrames.AttackEndDuration || 0) / 30,
+                ing: (normalFrames.AttackIngDuration || 0) / 30,
+                burstDelay: (normalFrames.AttackBurstRoundOverDelay || 0) / 30,
+                reload: (normalFrames.AttackReloadDuration || 0) / 30
+            }
+        };
+    }
+
     const regenEffects = [];
     ['Ex', 'Public', 'Passive', 'ExtraPassive', 'GearPublic'].forEach(slot => {
         const skill = student.Skills?.[slot];
@@ -136,6 +162,11 @@ const parseStudentData = (data) => {
                 // ExtraPassive fallback delay logic
                 if (slot === 'ExtraPassive' && delay === 0) {
                     delay = animationDuration;
+                }
+
+                // FORCE ACTIVE for Ex/Public to prevent permanent application
+                if (slot === 'Ex' || slot === 'Public') {
+                    logicType = 'Active';
                 }
 
                 if (specLogic && specLogic.slot === slot) {
@@ -184,6 +215,7 @@ const parseStudentData = (data) => {
       regenEffects,
       extraSkills, 
       publicSkill,
+      normalAttack, 
       exSkill: {
         name: exSkill.Name || "Unknown",
         type: effectType,
